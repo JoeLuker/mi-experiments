@@ -144,7 +144,6 @@
 Analysis Tools (analysis/*.py)
 
 
-Token analysis
 Embedding analysis
 Layer analysis
 Attention pattern analysis

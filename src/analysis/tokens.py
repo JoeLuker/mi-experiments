@@ -1,5 +1,6 @@
 from typing import List, Dict, Optional, Union, Tuple
 import mlx.core as mx
+import mlx.nn as nn
 import numpy as np
 from dataclasses import dataclass
 
@@ -50,11 +51,11 @@ class TokenAnalyzer:
         
         # Extract embeddings and states
         if isinstance(outputs, tuple):
-            logits = outputs[0]
+            embeddings = outputs[0]  # Use first hidden state as embeddings
             hidden_states = outputs[1] if return_layer_states else None
             attention_patterns = outputs[2] if return_attention else None
         else:
-            logits = outputs
+            embeddings = outputs
             hidden_states = None
             attention_patterns = None
             
@@ -66,7 +67,7 @@ class TokenAnalyzer:
         return TokenAnalysisResult(
             token_ids=token_ids.tolist(),
             token_text=token_text,
-            embeddings=logits,
+            embeddings=embeddings,
             layer_states=hidden_states,
             attention_patterns=attention_patterns,
             neuron_activations=neuron_activations
@@ -115,7 +116,7 @@ class TokenAnalyzer:
             up = mlp.up_proj(layer_state)
             
             # Apply SwiGLU activation
-            activated = mx.silu(gate) * up
+            activated = nn.silu(gate) * up
             
             # Store activations
             activations[layer_idx] = activated
@@ -124,10 +125,30 @@ class TokenAnalyzer:
     
     def _cosine_similarity(self, a: mx.array, b: mx.array) -> mx.array:
         """Compute cosine similarity between two sets of vectors."""
-        a_norm = mx.sqrt(mx.sum(a * a, axis=-1, keepdims=True))
-        b_norm = mx.sqrt(mx.sum(b * b, axis=-1, keepdims=True))
-        return mx.matmul(a, b.transpose()) / (a_norm * b_norm.transpose())
+        # Reshape inputs to 2D: (batch_size * seq_len, hidden_size)
+        a_flat = a.reshape(-1, a.shape[-1])
+        b_flat = b.reshape(-1, b.shape[-1])
+        
+        # Compute norms
+        a_norm = mx.sqrt(mx.sum(a_flat * a_flat, axis=-1, keepdims=True))
+        b_norm = mx.sqrt(mx.sum(b_flat * b_flat, axis=-1, keepdims=True))
+        
+        # Compute similarity
+        sim = mx.matmul(a_flat, b_flat.transpose())
+        norm_product = mx.matmul(a_norm, b_norm.transpose())
+        
+        # Reshape back to (seq_len1, seq_len2)
+        return sim / (norm_product + 1e-8)
     
     def _euclidean_distance(self, a: mx.array, b: mx.array) -> mx.array:
         """Compute Euclidean distance between two sets of vectors."""
-        return mx.sqrt(mx.sum((a[:, None, :] - b[None, :, :]) ** 2, axis=-1))
+        # Reshape inputs to 2D: (batch_size * seq_len, hidden_size)
+        a_flat = a.reshape(-1, a.shape[-1])
+        b_flat = b.reshape(-1, b.shape[-1])
+        
+        # Compute pairwise distances
+        a_norm = mx.sum(a_flat * a_flat, axis=1)
+        b_norm = mx.sum(b_flat * b_flat, axis=1)
+        
+        dist = a_norm[:, None] + b_norm[None, :] - 2.0 * mx.matmul(a_flat, b_flat.transpose())
+        return mx.sqrt(mx.maximum(dist, 0.0))

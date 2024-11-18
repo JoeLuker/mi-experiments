@@ -38,7 +38,7 @@ class MockModel:
     ):
         batch_size, seq_len = inputs.shape
         
-        # Generate mock embeddings
+        # Generate mock embeddings with hidden_size dimension
         h = mx.random.normal((batch_size, seq_len, self.hidden_size))
         hidden_states = []
         attention_patterns = []
@@ -53,15 +53,16 @@ class MockModel:
                     mx.random.normal((batch_size, 8, seq_len, seq_len))
                 )
         
+        # Final projection to vocab_size dimension
         logits = mx.random.normal((batch_size, seq_len, self.vocab_size))
         
         if return_hidden_states and return_attention:
-            return logits, hidden_states, attention_patterns
+            return h, hidden_states, attention_patterns  # Return h instead of logits
         elif return_hidden_states:
-            return logits, hidden_states
+            return h, hidden_states  # Return h instead of logits
         elif return_attention:
-            return logits, None, attention_patterns
-        return logits
+            return h, None, attention_patterns  # Return h instead of logits
+        return h  # Return h instead of logits
 
 class MockLayer:
     def __init__(self, hidden_size: int):
@@ -101,7 +102,8 @@ def test_analyze_sequence_basic(analyzer):
     assert isinstance(result, TokenAnalysisResult)
     assert len(result.token_ids) == len(text)
     assert len(result.token_text) == len(text)
-    assert result.embeddings.shape[1] == analyzer.model.vocab_size
+    assert result.embeddings.shape[1] == len(text)  # Check sequence length
+    assert result.embeddings.shape[2] == analyzer.model.hidden_size  # Check hidden size
     assert result.layer_states is None
     assert result.attention_patterns is None
     assert result.neuron_activations is None
