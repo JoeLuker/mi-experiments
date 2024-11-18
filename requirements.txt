@@ -1,0 +1,13 @@
+mlx
+dash
+plotly
+numpy
+pandas
+scikit-learn
+transformers
+huggingface_hub
+dash-bootstrap-components
+pytest
+black
+isort
+mypy

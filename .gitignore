@@ -1,10 +1,9 @@
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -21,12 +20,13 @@ wheels/
 .installed.cfg
 *.egg
 
-# Logs
-*.log
-logs/
-*.logs
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# Virtual Environment
+# Environment
+.env
+.venv
+env/
 venv/
 ENV/
 
@@ -36,16 +36,13 @@ ENV/
 *.swp
 *.swo
 
-# OS
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+# Logs
+*.log
 
-# Model files
+# Model weights
 *.safetensors
 *.bin
 *.pt
+
+# Local development
+local_settings.py
