@@ -11,23 +11,24 @@ def verbose(self, message, *args, **kwargs):
 
 logging.Logger.verbose = verbose
 
+# Create and configure default logger
+logger = logging.getLogger("mi_experiments")
+logger.setLevel(logging.INFO)
+
+# Add console handler if none exists
+if not logger.handlers:
+    console_handler = logging.StreamHandler()
+    formatter = logging.Formatter('[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s')
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
 def setup_logger(
     name: str,
     level: int = logging.INFO,
     log_file: Optional[str] = None,
     format_string: Optional[str] = None
 ) -> logging.Logger:
-    """Set up a logger with console and optional file handlers.
-    
-    Args:
-        name: Logger name (typically __name__)
-        level: Logging level (default: INFO)
-        log_file: Optional path to log file
-        format_string: Optional custom format string
-    
-    Returns:
-        Configured logger instance
-    """
+    """Set up a logger with console and optional file handlers."""
     if format_string is None:
         format_string = '[%(asctime)s] %(levelname)s [%(name)s:%(lineno)s] %(message)s'
     
@@ -48,3 +49,5 @@ def setup_logger(
         logger.addHandler(file_handler)
     
     return logger
+
+__all__ = ['logger', 'setup_logger', 'VERBOSE']

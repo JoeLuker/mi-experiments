@@ -1,9 +1,11 @@
 from typing import List, Dict, Optional, Generator
 import mlx.core as mx
 from dataclasses import dataclass
+import time
 
-from ..core.cache import BatchedKVCache
-from ..utils.logging import setup_logger
+from mi_experiments.core.cache import BatchedKVCache
+from mi_experiments.utils.logging import setup_logger
+from mi_experiments.inference.generate import generate_step
 
 logger = setup_logger(__name__)
 
@@ -30,6 +32,7 @@ class BatchManager:
         self.config = config or BatchConfig()
         self.current_batch = []
         self.sequence_map = {}  # Maps sequence IDs to batch indices
+        self.cache = {}  # Store KV cache per batch
         
     def create_batches(
         self,
@@ -38,7 +41,7 @@ class BatchManager:
     ) -> Generator[Dict[str, mx.array], None, None]:
         """Create optimized batches from input sequences."""
         # Tokenize all sequences
-        tokenized = self.tokenizer(
+        tokenized = self.tokenizer._tokenizer(
             sequences,
             padding=True,
             return_tensors="np"
@@ -135,3 +138,134 @@ class BatchManager:
                 'attention_mask': attention_mask,
                 'sequence_ids': [f"seq_{j}" for j in range(batch_start_idx, batch_start_idx + len(batch_ids))]
             }
+    
+    def get_batch_cache(self, batch_size: int) -> List[BatchedKVCache]:
+        """Create or retrieve KV cache for batch."""
+        cache_key = f"batch_{batch_size}"
+        if cache_key not in self.cache:
+            kv_heads = (
+                [self.model.n_kv_heads] * len(self.model.layers)
+                if isinstance(self.model.n_kv_heads, int)
+                else self.model.n_kv_heads
+            )
+            
+            self.cache[cache_key] = [
+                BatchedKVCache(
+                    head_dim=self.model.head_dim,
+                    n_kv_heads=n_heads,
+                    batch_size=batch_size
+                )
+                for n_heads in kv_heads
+            ]
+            
+        return self.cache[cache_key]
+    
+    def process_batch(
+        self,
+        batch: Dict[str, mx.array],
+        max_tokens: int = 100,
+        **kwargs
+    ) -> mx.array:
+        """Process a single batch through the model for generation."""
+        output_toks = []
+        for step_output in generate_step(batch['input_ids'], self.model, **kwargs):
+            tokens = step_output[0]  # Assuming tokens are the first element
+            output_toks.append(tokens)
+            if len(output_toks) >= max_tokens:
+                break
+        
+        return mx.concatenate(output_toks, axis=1)
+
+    def batch_generate(
+        self,
+        prompts: List[str],
+        max_tokens: int = 100,
+        verbose: bool = False,
+        format_prompts: bool = True,
+        **kwargs,
+    ) -> List[str]:
+        """
+        Generate responses for multiple prompts in batches.
+
+        Args:
+            prompts (List[str]): The list of string prompts.
+            max_tokens (int): The maximum number of tokens. Default: ``100``.
+            verbose (bool): If ``True``, print tokens and timing information.
+                Default: ``False``.
+            format_prompts (bool): If ``True``, format the prompts before tokenizing.
+                Default: ``True``.
+            kwargs: Additional options passed to generate_step.
+        """
+        if verbose:
+            print("=" * 10)
+        
+        if format_prompts:
+            prompts_fm = [[{"role": "user", "content": prompt}] for prompt in prompts]
+            prompts_fm = [
+                self.tokenizer.apply_chat_template(prompt, add_generation_prompt=True, tokenize=False)
+                for prompt in prompts_fm
+            ]
+        else:
+            prompts_fm = prompts
+
+        # Left-padding for batched generation
+        self.tokenizer._tokenizer.padding_side = 'left'
+        if self.tokenizer.pad_token is None:
+            self.tokenizer._tokenizer.pad_token = self.tokenizer.eos_token
+            self.tokenizer._tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+        tic = time.perf_counter()
+        all_outputs = []
+        
+        for batch in self.create_batches(prompts_fm):
+            output_toks = self.process_batch(batch, max_tokens=max_tokens, **kwargs)
+            all_outputs.append(output_toks)
+            
+            if len(all_outputs) == 1:
+                prompt_time = time.perf_counter() - tic
+                tic = time.perf_counter()
+
+        output_toks = mx.concatenate(all_outputs, axis=0)
+
+        # Detokenizing + stripping pad/eos tokens
+        responses = [
+            response.split(self.tokenizer.eos_token)[0].split(self.tokenizer.pad_token)[0]
+            for response in self.tokenizer.batch_decode(output_toks.tolist())
+        ]
+        
+        if verbose:
+            gen_time = time.perf_counter() - tic
+            total_prompt_tokens = sum(len(self.tokenizer.encode(p)) for p in prompts_fm)
+            total_output_tokens = output_toks.size
+            prompt_tps = total_prompt_tokens / prompt_time
+            gen_tps = total_output_tokens / gen_time
+            print(f"Prompt: {prompt_tps:.3f} tokens-per-second")
+            print(f"Generation: {gen_tps:.3f} tokens-per-second")
+            for prompt, response in zip(prompts, responses):
+                print("=" * 10)
+                print("Prompt:", prompt)
+                print(response)
+                
+        return responses
+
+
+def batch_generate(
+    model,
+    tokenizer,
+    prompts: List[str],
+    max_tokens: int = 100,
+    verbose: bool = False,
+    format_prompts: bool = True,
+    **kwargs,
+) -> List[str]:
+    """
+    Standalone function to generate responses for multiple prompts in batches.
+    """
+    manager = BatchManager(model, tokenizer)
+    return manager.batch_generate(
+        prompts=prompts,
+        max_tokens=max_tokens,
+        verbose=verbose,
+        format_prompts=format_prompts,
+        **kwargs
+    )

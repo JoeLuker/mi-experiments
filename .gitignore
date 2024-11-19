@@ -46,3 +46,7 @@ ENV/
 
 # Local development
 local_settings.py
+
+old_reference_code.txt
+new-output.txt
+reference_notebook.ipynb
