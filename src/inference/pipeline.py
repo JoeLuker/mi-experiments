@@ -9,8 +9,8 @@ import mlx.core as mx
 from transformers import PreTrainedTokenizer
 
 from .generate import GenerationConfig, generate
-from ..core.model import Model
-from ..utils.sampling import sample_token
+from src.core.model import Model
+from src.utils.sampling import sample_token
 
 logger = logging.getLogger(__name__)
 

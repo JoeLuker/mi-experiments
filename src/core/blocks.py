@@ -4,8 +4,8 @@ from typing import Optional, Tuple, Dict, Any
 import mlx.core as mx
 import mlx.nn as nn
 
-from .model import ModelArgs
-from .attention import Attention, create_attention_mask
+from .config import ModelArgs
+from .attention import Attention
 
 class MLP(nn.Module):
     """Multi-layer perceptron with SwiGLU activation."""
@@ -75,29 +75,25 @@ class TransformerBlock(nn.Module):
         x: mx.array,
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
-    ) -> Tuple[mx.array, mx.array, mx.array, Dict[str, Any], Optional[Any]]:
+    ) -> mx.array:
         """Forward pass for transformer block."""
         # Skip if layer is fully ablated
         if self.layer_scale == 0.0:
             return x, None, x, {}, cache
             
-        # Pre-normalization and attention
+        # Pre-normalization
         pre_attn = self.input_layernorm(x)
-        attn_out, attn_weights, _, attn_data, new_cache = self.self_attn(
-            pre_attn, mask, cache
-        )
         
-        # First residual connection with layer scaling
+        # Attention block
+        attn_out = self.self_attn(pre_attn, mask, cache)
         h = x + attn_out * self.layer_scale
         
-        # Pre-normalization and MLP
+        # MLP block
         pre_mlp = self.post_attention_layernorm(h)
         mlp_out = self.mlp(pre_mlp)
-        
-        # Second residual connection with layer scaling
         out = h + mlp_out * self.layer_scale
         
-        return out, attn_weights, pre_attn, attn_data, new_cache
+        return out
 
     def update_layer_scale(self, scale: float) -> None:
         """Update layer scaling factor."""

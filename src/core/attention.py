@@ -1,129 +1,82 @@
 # core/attention.py
 
-from typing import Optional, Dict, Union
+from typing import Optional, Dict, Union, Any, Tuple
 import inspect
 
 import mlx.core as mx
 import mlx.nn as nn
 
-from .model import ModelArgs
+from .config import ModelArgs
+from .rope import initialize_rope, DynamicNTKScalingRoPE
 
-class DynamicNTKScalingRoPE(nn.Module):
-    """Enhanced rotary position encoding with multiple scaling strategies."""
-
-    SCALING_TYPES = ["default", "dynamic", "linear", "ntk", "llama3"]
-    
-    def __init__(
-        self,
-        dims: int,
-        max_position_embeddings: int = 2048,
-        traditional: bool = False,
-        base: float = 10000,
-        scale: float = 1.0,
-        rope_type: str = "default",
-        rope_scaling: Optional[Dict[str, Union[float, str]]] = None,
-    ):
+class Attention(nn.Module):
+    def __init__(self, args: ModelArgs):
         super().__init__()
-        if rope_type not in self.SCALING_TYPES:
-            raise ValueError(f"Unsupported scaling type: {rope_type}. Must be one of {self.SCALING_TYPES}")
-            
-        self.dims = dims
-        self.max_position_embeddings = max_position_embeddings
-        self.traditional = traditional
-        self.original_base = base
-        self.scale = scale
-        self.rope_type = rope_type
-        self.rope_scaling = rope_scaling
-        self.base = self.compute_base_freq()
-
-    def compute_ntk_scaling(self, seq_len: int) -> float:
-        """Compute NTK-aware scaling factor."""
-        if seq_len <= self.max_position_embeddings:
-            return 1.0
+        dim = args.hidden_size
+        self.n_heads = n_heads = args.num_attention_heads
+        self.n_kv_heads = n_kv_heads = args.num_key_value_heads or n_heads
+        self.head_dim = head_dim = args.head_dim or dim // n_heads
+        self.scale = head_dim**-0.5
         
-        return (
-            (self.scale * seq_len / self.max_position_embeddings) - (self.scale - 1)
-        ) ** (self.dims / (self.dims - 2))
-
-    def compute_dynamic_scaling(self, seq_len: int) -> float:
-        """Compute dynamic scaling factor based on sequence length."""
-        if not self.rope_scaling or "factor" not in self.rope_scaling:
-            return 1.0
-            
-        factor = self.rope_scaling["factor"]
-        alpha = self.rope_scaling.get("alpha", 1.0)
-        target_len = self.max_position_embeddings * factor
+        self.q_proj = nn.Linear(dim, n_heads * head_dim, bias=args.attention_bias)
+        self.k_proj = nn.Linear(dim, n_kv_heads * head_dim, bias=args.attention_bias)
+        self.v_proj = nn.Linear(dim, n_kv_heads * head_dim, bias=args.attention_bias)
+        self.o_proj = nn.Linear(n_heads * head_dim, dim, bias=args.attention_bias)
         
-        if seq_len <= self.max_position_embeddings:
-            return 1.0
-            
-        return (target_len / seq_len) ** alpha
+        self.rope = initialize_rope(args)
+        self.head_scale = mx.ones((max(n_heads, n_kv_heads),), dtype=mx.float32)
 
-    def compute_llama3_base_freq(self) -> float:
-        """Enhanced LLaMA 3 RoPE scaling."""
-        if not self.rope_scaling:
-            return self.original_base
-            
-        factor = self.rope_scaling["factor"]
-        low_freq_factor = self.rope_scaling.get("low_freq_factor", 1.0)
-        high_freq_factor = self.rope_scaling.get("high_freq_factor", 4.0)
-        old_context_len = self.rope_scaling.get(
-            "original_max_position_embeddings",
-            8192,
-        )
+    def __call__(
+        self,
+        x: mx.array,
+        mask: Optional[mx.array] = None,
+        cache: Optional[Any] = None,
+    ) -> mx.array:
+        B, L, D = x.shape
+        head_dim = D // self.n_heads
 
-        # Compute frequency bands
-        low_freq_wavelen = old_context_len / low_freq_factor
-        high_freq_wavelen = old_context_len / high_freq_factor
+        # Project to queries, keys, values
+        queries = self.q_proj(x)
+        keys = self.k_proj(x)
+        values = self.v_proj(x)
 
-        # Create frequency tensor
-        freqs = self.original_base ** (mx.arange(0, self.dims, 2) / self.dims)
-        wavelens = 2 * mx.pi * freqs
+        # Reshape to [batch_size, seq_len, n_heads, head_dim]
+        queries = queries.reshape(B, L, self.n_heads, head_dim)
+        keys = keys.reshape(B, L, self.n_kv_heads, head_dim)
+        values = values.reshape(B, L, self.n_kv_heads, head_dim)
 
-        # Apply smooth scaling
-        smooths = (wavelens - high_freq_wavelen) / (
-            low_freq_wavelen - high_freq_wavelen
-        )
-        smooths = mx.clip(smooths, 0, 1)
+        # Transpose to [batch_size, n_heads, seq_len, head_dim]
+        queries = queries.transpose(0, 2, 1, 3)
+        keys = keys.transpose(0, 2, 1, 3)
+        values = values.transpose(0, 2, 1, 3)
 
-        # Compute scaled frequencies
-        new_base_freqs = freqs * (1 - smooths) * factor + smooths
-        new_base_freqs = mx.where(wavelens < high_freq_wavelen, freqs, new_base_freqs)
-        new_base_freqs = mx.where(
-            wavelens > low_freq_wavelen, freqs * factor, new_base_freqs
-        )
+        # Handle KV cache if provided
+        if cache is not None:
+            queries = self.rope(queries, offset=cache.offset)
+            keys = self.rope(keys, offset=cache.offset)
+            keys, values = cache.update_and_fetch(keys, values)
+        else:
+            queries = self.rope(queries)
+            keys = self.rope(keys)
 
-        return new_base_freqs.mean().item()
+        # Compute attention scores
+        scale = 1.0 / mx.sqrt(head_dim)
+        scores = mx.matmul(queries, keys.transpose(0, 1, 3, 2)) * scale
 
-    def compute_base_freq(self) -> float:
-        """Compute base frequency based on scaling type."""
-        if self.rope_type == "llama3":
-            return self.compute_llama3_base_freq()
-        elif self.rope_type == "linear" and self.rope_scaling:
-            return self.original_base / self.rope_scaling["factor"]
-        return self.original_base
+        # Apply mask if provided - reshape mask for broadcasting
+        if mask is not None:
+            # Reshape mask to [batch_size, 1, 1, seq_length] for broadcasting
+            mask = mask[:, None, None, :]
+            scores = scores + mask
 
-    def __call__(self, x: mx.array, offset: int = 0) -> mx.array:
-        """Apply rotary position encoding with appropriate scaling."""
-        seq_len = x.shape[1] + offset
-        base = self.base
+        # Compute attention weights and output
+        weights = mx.softmax(scores, axis=-1)
+        output = mx.matmul(weights, values)
+
+        # Reshape back to [batch_size, seq_len, hidden_size]
+        output = output.transpose(0, 2, 1, 3).reshape(B, L, D)
         
-        # Apply scaling based on type
-        if self.rope_type == "ntk":
-            scale_factor = self.compute_ntk_scaling(seq_len)
-            base *= scale_factor
-        elif self.rope_type == "dynamic":
-            scale_factor = self.compute_dynamic_scaling(seq_len)
-            base *= scale_factor
-
-        return mx.fast.rope(
-            x,
-            self.dims,
-            traditional=self.traditional,
-            base=base,
-            scale=self.scale,
-            offset=offset,
-        )
+        return self.o_proj(output)
 
 def create_additive_causal_mask(N: int, offset: int = 0) -> mx.array:
     """Create causal attention mask."""
@@ -143,33 +96,6 @@ def create_attention_mask(h: mx.array, cache: Optional[Any] = None) -> Optional[
         mask = create_additive_causal_mask(T, offset)
         return mask.astype(h.dtype)
     return None
-
-def initialize_rope(args: ModelArgs) -> DynamicNTKScalingRoPE:
-    """Initialize RoPE layer from model arguments."""
-    head_dim = args.head_dim or args.hidden_size // args.num_attention_heads
-
-    rope_scaling = args.rope_scaling
-    rope_type = "default"
-    rope_scale = 1.0
-
-    if rope_scaling is not None:
-        rope_type = (
-            rope_scaling.get("type") or rope_scaling.get("rope_type") or "default"
-        )
-        if rope_type == "linear":
-            rope_scale = 1 / rope_scaling["factor"]
-        elif rope_type == "llama3":
-            rope_scale = 1.0  # Scaling handled internally for llama3
-
-    return DynamicNTKScalingRoPE(
-        dims=head_dim,
-        max_position_embeddings=args.max_position_embeddings,
-        traditional=args.rope_traditional,
-        base=args.rope_theta,
-        scale=rope_scale,
-        rope_type=rope_type,
-        rope_scaling=rope_scaling,
-    )
 
 class ScaledQueryAttention(nn.Module):
     """Optimized attention implementation with query scaling."""

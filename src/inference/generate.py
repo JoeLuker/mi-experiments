@@ -8,8 +8,8 @@ import mlx.core as mx
 import mlx.nn as nn
 from transformers import PreTrainedTokenizer
 
-from ..core.model import Model, BatchedKVCache
-from ..core.attention import create_attention_mask
+from src.core.model import Model, BatchedKVCache
+from src.core.attention import create_attention_mask
 
 logger = logging.getLogger(__name__)
 
