@@ -32,18 +32,14 @@ def load_model(
     lazy: bool = False,
     model_config: dict = {},
 ) -> nn.Module:
-    
     config = load_config(model_path)
     config.update(model_config)
 
     weight_files = glob.glob(str(model_path / "model*.safetensors"))
-
     if not weight_files:
-        # Try weight for back-compat
         weight_files = glob.glob(str(model_path / "weight*.safetensors"))
-
+    
     if not weight_files:
-        logging.error(f"No safetensors found in {model_path}")
         raise FileNotFoundError(f"No safetensors found in {model_path}")
 
     weights = {}
@@ -57,7 +53,6 @@ def load_model(
         weights = model.sanitize(weights)
 
     if (quantization := config.get("quantization", None)) is not None:
-        # Handle legacy models which may not have everything quantized
         def class_predicate(p, m):
             if not hasattr(m, "to_quantized"):
                 return False
@@ -69,8 +64,7 @@ def load_model(
             class_predicate=class_predicate,
         )
 
-
-    model.load_weights(list(weights.items()))
+    model.load_weights(list(weights.items()), strict=False)
 
     if not lazy:
         mx.eval(model.parameters())

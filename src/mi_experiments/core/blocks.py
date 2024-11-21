@@ -21,6 +21,8 @@ class TransformerBlock(nn.Module):
             args.hidden_size, eps=args.rms_norm_eps
         )
         self.args = args
+        # Emphasis scaling factor for the layer
+        self.layer_scale = mx.array(1.0, dtype=mx.float32)  # Default scaling factor
 
     def __call__(
         self,
@@ -32,5 +34,4 @@ class TransformerBlock(nn.Module):
         h = x + r
         r = self.mlp(self.post_attention_layernorm(h))
         out = h + r
-        return out
-
+        return out * self.layer_scale  # Apply layer scaling

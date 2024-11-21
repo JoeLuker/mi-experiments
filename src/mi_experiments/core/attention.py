@@ -53,6 +53,9 @@ class Attention(nn.Module):
         self.o_proj = nn.Linear(n_heads * head_dim, dim, bias=attention_bias)
 
         self.rope = initialize_rope(args)
+        
+        # Initialize head scaling factors
+        self.head_scale = mx.ones((n_heads,), dtype=mx.float32)
 
     def __call__(
         self,
@@ -69,7 +72,6 @@ class Attention(nn.Module):
         keys = keys.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
         values = values.reshape(B, L, self.n_kv_heads, -1).transpose(0, 2, 1, 3)
 
-
         if cache is not None:
             queries = self.rope(queries, offset=cache.offset)
             keys = self.rope(keys, offset=cache.offset)
@@ -77,6 +79,10 @@ class Attention(nn.Module):
         else:
             queries = self.rope(queries)
             keys = self.rope(keys)
+
+        # Apply head scaling to queries
+        head_scale = self.head_scale.reshape(1, -1, 1, 1)  # [1, n_heads, 1, 1]
+        queries = queries * head_scale
 
         output = mx.fast.scaled_dot_product_attention(
             queries, keys, values, scale=self.scale, mask=mask

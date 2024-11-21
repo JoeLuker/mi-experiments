@@ -18,7 +18,16 @@ class MLP(nn.Module):
         self.gate_proj = nn.Linear(dim, hidden_dim, bias=mlp_bias)
         self.down_proj = nn.Linear(hidden_dim, dim, bias=mlp_bias)
         self.up_proj = nn.Linear(dim, hidden_dim, bias=mlp_bias)
+        
+        # Emphasis scaling factors for neurons
+        self.neuron_scale = mx.ones((hidden_dim,))  # Initialize neuron scaling
 
     def __call__(self, x) -> mx.array:
-        return self.down_proj(nn.silu(self.gate_proj(x)) * self.up_proj(x))
-
+        gate_output = nn.silu(self.gate_proj(x))
+        up_output = self.up_proj(x)
+        
+        # Apply neuron scaling
+        scale = self.neuron_scale.reshape(1, 1, -1)  # [1, 1, hidden_dim]
+        scaled_output = (gate_output * up_output) * scale
+        
+        return self.down_proj(scaled_output)
