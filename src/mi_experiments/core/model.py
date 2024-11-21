@@ -161,12 +161,13 @@ class Model(nn.Module):
     def n_kv_heads(self):
         return self.args.num_key_value_heads
 
-    def get_layer_output(self, layer_idx: int, inputs: mx.array) -> mx.array:
+    def get_layer_output(self, layer_idx: int, inputs: mx.array, cache=None) -> mx.array:
         """Get the output of a specific layer.
         
         Args:
             layer_idx: Index of the layer to get output from
             inputs: Input tokens
+            cache: Optional KV cache for attention layers
             
         Returns:
             Layer output tensor
@@ -177,12 +178,19 @@ class Model(nn.Module):
         # Get embeddings
         h = self.model.embed_tokens(inputs)
         
+        # Create attention mask if using cache
+        mask = create_attention_mask(h, cache) if cache else None
+        
         # Process through layers up to requested layer
         for i, layer in enumerate(self.model.layers):
-            h = layer(h)
+            if cache:
+                h = layer(h, mask, cache=cache[i])
+            else:
+                h = layer(h)
+            
             if i == layer_idx:
                 return self.model.norm(h)  # Apply final norm
-            
+        
         return h
     
     def get_all_layer_outputs(self, inputs: mx.array) -> List[mx.array]:
